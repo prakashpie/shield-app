@@ -1,7 +1,8 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { format, isSameDay, isAfter, isBefore } from 'date-fns'
+import { subDays, isBefore, isSameDay, isAfter, startOfDay as dateFnsStartOfDay } from 'date-fns'
+import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 
 export interface DateRange {
   from: Date | null
@@ -17,23 +18,97 @@ interface CalendarDay {
 interface DateRangeInputProps {
   value: DateRange
   onChange: (range: DateRange) => void
+  timezone: string
   placeholder?: string
+  maxPastDays?: number
 }
 
-const DateRangeInput: React.FC<DateRangeInputProps> = ({ value, onChange, placeholder }) => {
+const getStartOfDayInTimezone = (date: Date | null | undefined, timezone: string): Date | null => {
+  if (!date) return null
+  const dateString = formatInTimeZone(date, timezone, 'yyyy-MM-dd')
+  return fromZonedTime(dateString, timezone)
+}
+
+const getEndOfDayInTimezone = (date: Date | null | undefined, timezone: string): Date | null => {
+  if (!date) return null
+  const startOfDayUTC = getStartOfDayInTimezone(date, timezone)
+  if (!startOfDayUTC) return null
+  const endOfDayString = formatInTimeZone(startOfDayUTC, timezone, 'yyyy-MM-dd') + 'T23:59:59.999'
+  return fromZonedTime(endOfDayString, timezone)
+}
+
+const DateRangeInput: React.FC<DateRangeInputProps> = ({
+  value,
+  onChange,
+  timezone,
+  maxPastDays = -1,
+  placeholder = 'Select date range'
+}) => {
   const [isOpen, setIsOpen] = useState(false)
-  const [currentDisplayMonth, setCurrentDisplayMonth] = useState(value.from ?? new Date())
-  const [selectedRange, setSelectedRange] = useState<DateRange>(value)
+
+  const getInitialDisplayMonth = () => {
+    if (value.from) {
+      return toZonedTime(value.from, timezone)
+    }
+    return toZonedTime(new Date(), timezone)
+  }
+
+  const checkMaxPastDays = useCallback((dateLocal: Date): boolean => {
+    // check date if it older than maxPastDays
+    if (maxPastDays == -1) {
+      return false
+    }
+
+    const nowInTimezone = toZonedTime(new Date(), timezone)
+    const startOfTodayUTC = getStartOfDayInTimezone(nowInTimezone, timezone)
+
+    if (!startOfTodayUTC) {
+      console.error('Could not determine the start of today in the specified timezone.')
+      return false
+    }
+
+    const limitDateUTC = subDays(startOfTodayUTC, maxPastDays)
+
+    const inputDateUTC = getStartOfDayInTimezone(dateLocal, timezone)
+
+    if (!inputDateUTC) {
+      console.error('Could not determine the input date in the specified timezone.')
+      return false
+    }
+
+    return isBefore(inputDateUTC, limitDateUTC)
+  }, [maxPastDays, timezone])
+
+  const [currentDisplayMonth, setCurrentDisplayMonth] = useState(getInitialDisplayMonth)
+  const [selectedRange, setSelectedRange] = useState<DateRange>(() => ({
+    from: getStartOfDayInTimezone(value.from, timezone),
+    to: getStartOfDayInTimezone(value.to, timezone) // Store start of day for 'to' internally for simplicity
+  }))
 
   const panelRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    setSelectedRange(value)
-    if (value.from && !isOpen) {
-      setCurrentDisplayMonth(value.from)
+    const newSelectedRange = {
+      from: getStartOfDayInTimezone(value.from, timezone),
+      to: getStartOfDayInTimezone(value.to, timezone)
     }
-  }, [value, isOpen])
+    setSelectedRange(newSelectedRange)
+
+    if (value.from && !isOpen) {
+      setCurrentDisplayMonth(toZonedTime(value.from, timezone))
+    } else if (!value.from && !isOpen) {
+      setCurrentDisplayMonth(toZonedTime(new Date(), timezone))
+    }
+  }, [value, timezone, isOpen])
+
+  const handleCancel = useCallback(() => {
+    setSelectedRange({
+      from: getStartOfDayInTimezone(value.from, timezone),
+      to: getStartOfDayInTimezone(value.to, timezone)
+    })
+    setIsOpen(false)
+  }, [value, timezone, setSelectedRange, setIsOpen])
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -51,9 +126,7 @@ const DateRangeInput: React.FC<DateRangeInputProps> = ({ value, onChange, placeh
     return () => {
       document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [isOpen, selectedRange])
-
-  const [currentDate, setCurrentDate] = useState(new Date())
+  }, [isOpen, handleCancel])
 
   const generateCalendarDays = (date: Date) => {
     const year = date.getFullYear()
@@ -71,8 +144,9 @@ const DateRangeInput: React.FC<DateRangeInputProps> = ({ value, onChange, placeh
       const day = daysInPreviousMonth - firstDayOfWeek + 1 + i
       calendarDays.push({
         dayOfMonth: day,
-        date: new Date(year, month - 1, day),
-        isCurrentMonth: false
+        date: dateFnsStartOfDay(new Date(year, month - 1, day)),
+        isCurrentMonth: false,
+        isDisabled: checkMaxPastDays(dateFnsStartOfDay(new Date(year, month - 1, day)))
       })
     }
 
@@ -80,93 +154,113 @@ const DateRangeInput: React.FC<DateRangeInputProps> = ({ value, onChange, placeh
     for (let i = 1; i <= daysInMonth; i++) {
       calendarDays.push({
         dayOfMonth: i,
-        date: new Date(year, month, i),
-        isCurrentMonth: true
+        date: dateFnsStartOfDay(new Date(year, month, i)),
+        isCurrentMonth: true,
+        isDisabled: checkMaxPastDays(dateFnsStartOfDay(new Date(year, month, i)))
       })
     }
 
     // add trailing days from next month
-    const remainingDays = calendarDays.length > 35 ? 42 - calendarDays.length : 35 - calendarDays.length
+    const totalDays = calendarDays.length
+    const remainingDays = totalDays <= 35 ? 42 - totalDays : totalDays <= 42 ? 42 - totalDays : 0
     for (let i = 1; i <= remainingDays; i++) {
       calendarDays.push({
         dayOfMonth: i,
-        date: new Date(year, month + 1, i),
-        isCurrentMonth: false
+        // Store date as start of day in local TZ for now
+        date: dateFnsStartOfDay(new Date(year, month + 1, i)),
+        isCurrentMonth: false,
+        isDisabled: checkMaxPastDays(dateFnsStartOfDay(new Date(year, month + 1, i)))
       })
     }
     return calendarDays
   }
 
   const handleNextMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1))
+    setCurrentDisplayMonth(prev => {
+      const zonedPrev = toZonedTime(prev, timezone) // Ensure we work with zoned time
+      return new Date(zonedPrev.getFullYear(), zonedPrev.getMonth() + 1, 1)
+    })
   }
 
   const handlePrevMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1))
+    setCurrentDisplayMonth(prev => {
+      const zonedPrev = toZonedTime(prev, timezone) // Ensure we work with zoned time
+      return new Date(zonedPrev.getFullYear(), zonedPrev.getMonth() - 1, 1)
+    })
   }
 
   const togglePanel = () => {
     setIsOpen(!isOpen)
     if (!isOpen) {
-      setSelectedRange(value)
-      setCurrentDisplayMonth(value.from ?? new Date())
+      setSelectedRange({
+        from: getStartOfDayInTimezone(value.from, timezone),
+        to: getStartOfDayInTimezone(value.to, timezone)
+      })
+      setCurrentDisplayMonth(getInitialDisplayMonth())
     }
   }
 
   const handleDayClick = (day: CalendarDay) => {
-    const clickedDate = day.date // Already normalized by generateCalendarDays
+    const clickedDateUTC = getStartOfDayInTimezone(day.date, timezone)
+    if (!clickedDateUTC) return // Should not happen if day.date is valid
 
     setSelectedRange(prevRange => {
       const { from, to } = prevRange
 
       if (!from || (from && to)) {
-        return { from: clickedDate, to: null }
+        return { from: clickedDateUTC, to: null }
       } else {
-        if (isBefore(clickedDate, from)) {
-          return { from: clickedDate, to: null }
+        if (isBefore(clickedDateUTC, from)) {
+          return { from: clickedDateUTC, to: null }
         } else {
-          return { from: from, to: clickedDate }
+          return { from: from, to: clickedDateUTC }
         }
       }
     })
   }
 
   const handleApply = () => {
-    let finalFrom = selectedRange.from
-    let finalTo = selectedRange.to
+    let finalFromUTC = selectedRange.from
+    let finalToUTC = selectedRange.to
 
-    if (finalFrom && finalTo && isAfter(finalFrom, finalTo)) {
-      // Swap if 'from' is after 'to'
-      ;[finalFrom, finalTo] = [finalTo, finalFrom]
+    if (finalFromUTC && finalToUTC && isAfter(finalFromUTC, finalToUTC)) {
+      ;[finalFromUTC, finalToUTC] = [finalToUTC, finalFromUTC]
     }
 
-    onChange({ from: finalFrom, to: finalTo })
+    const finalEndToUTC = getEndOfDayInTimezone(finalToUTC, timezone)
+
+    onChange({ from: finalFromUTC, to: finalEndToUTC })
     setIsOpen(false)
   }
 
-  const handleCancel = useCallback(() => {
-    setSelectedRange(value)
-    setIsOpen(false)
-  }, [value, setSelectedRange, setIsOpen])
-
   const calendarDays = useMemo(() => generateCalendarDays(currentDisplayMonth), [currentDisplayMonth])
-  const currentMonthYear = useMemo(() => format(currentDisplayMonth, 'MMMM yyyy'), [currentDisplayMonth])
+  const currentMonthYear = useMemo(
+    () => formatInTimeZone(currentDisplayMonth, timezone, 'MMMM yyyy'),
+    [currentDisplayMonth, timezone]
+  )
   const daysOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
   const displayRangeString = useMemo(() => {
     const { from, to } = value
     if (!from) return placeholder
-    const fromStr = format(from, 'PP')
-    const toStr = to ? format(to, 'PP') : null
-    return toStr && fromStr !== toStr ? `${fromStr} - ${toStr}` : fromStr
-  }, [value, placeholder])
+    const fromStr = formatInTimeZone(from, timezone, 'PP')
+    const toStr = to ? formatInTimeZone(to, timezone, 'PP') : null
+    const fromDayStr = formatInTimeZone(from, timezone, 'yyyy-MM-dd')
+    const toDayStr = to ? formatInTimeZone(to, timezone, 'yyyy-MM-dd') : null
+    return toStr && fromDayStr !== toDayStr ? `${fromStr} - ${toStr}` : fromStr
+  }, [value, timezone, placeholder])
 
-  const getDayState = (dayDate: Date) => {
-    const { from, to } = selectedRange
-    const isSelectedFrom = from && isSameDay(dayDate, from)
-    const isSelectedTo = to && isSameDay(dayDate, to)
-    const isInRange = from && to && isAfter(dayDate, from) && isBefore(dayDate, to)
+  const getDayState = (dayDateLocal: Date) => {
+    const dayDateUTC = getStartOfDayInTimezone(dayDateLocal, timezone)
+    if (!dayDateUTC) return { isSelectedFrom: false, isSelectedTo: false, isInRange: false, isSelected: false }
+
+    const { from, to } = selectedRange // These are already start of day in TZ (as UTC)
+
+    const isSelectedFrom = from && isSameDay(dayDateUTC, from)
+    const isSelectedTo = to && isSameDay(dayDateUTC, to)
+    const isInRange = from && to && isAfter(dayDateUTC, from) && isBefore(dayDateUTC, to)
     const isSelected = isSelectedFrom || isSelectedTo
+
     return { isSelectedFrom, isSelectedTo, isInRange, isSelected }
   }
 
@@ -181,7 +275,9 @@ const DateRangeInput: React.FC<DateRangeInputProps> = ({ value, onChange, placeh
         <span className='icon-button__icon material-icons mr-2 text-base' aria-hidden='true'>
           calendar_month
         </span>
-        <span className='truncate text-sm'>{displayRangeString}</span>
+        <span className='truncate text-sm'>
+          {displayRangeString} - {timezone}
+        </span>
       </div>
       {isOpen && (
         <div
@@ -224,19 +320,19 @@ const DateRangeInput: React.FC<DateRangeInputProps> = ({ value, onChange, placeh
                 isSelectedFrom ? 'rounded-l-full' : '',
                 isSelectedTo ? 'rounded-r-full' : '',
                 isInRange ? 'bg-blue-100 text-blue-800 rounded-none hover:bg-blue-200' : '',
-                isSelectedFrom && isSelectedTo ? 'rounded-full' : ''
+                isSelectedFrom && isSelectedTo ? 'rounded-full' : '',
+                day.isDisabled ? 'pointer-events-none disabled op-70' : ''
               ]
                 .filter(Boolean)
                 .join(' ')
 
               return (
                 <div
-                  key={day.date.toISOString()}
+                  key={day.date.toISOString()} // Use ISO string for key
                   onClick={() => day.isCurrentMonth && handleDayClick(day)}
                   className={dayClasses}
                   role='button'
-                  aria-pressed={isSelected} // Indicate selection state
-                  aria-label={format(day.date, 'PPP')} // e.g., Aug 15th, 2024
+                  aria-disabled={day.isDisabled}
                 >
                   {day.dayOfMonth}
                 </div>

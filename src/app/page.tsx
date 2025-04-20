@@ -100,7 +100,6 @@ const Page = () => {
         const users = await fetchUsersByDateRange(selectedRange)
         setDisplayedUsers(users)
       } catch (err) {
-        console.error('Error while fetching users:', err)
         setError('Failed to load data. Please try again.')
         setDisplayedUsers([])
       } finally {
@@ -156,7 +155,7 @@ const Page = () => {
                 initialSortKey={'name'}
                 caption={'Data Table'}
               >
-                <DateRangeInput value={selectedRange} onChange={setSelectedRange} placeholder={'Select Registration Dates'}/>
+                <DateRangeInput value={selectedRange} onChange={setSelectedRange} placeholder={'Select Registration Dates'} timezone={'Asia/Calcutta'} maxPastDays={90}/>
               </Table>
             )}
             {isLoading && <div className='p-4 text-center text-gray-500'>Loading data...</div>}

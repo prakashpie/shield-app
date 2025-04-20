@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Karla } from "next/font/google";
-import '@/styles/global.css';
 
 const karlaSans = Karla({
   variable: "--font-kerla-sans",
